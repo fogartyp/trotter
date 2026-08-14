@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date
+
+CARD_NAME_PATTERN = re.compile(
+    r"(?P<date>\d{4}-\d{2}-\d{2})-(?P<track>[A-Z0-9]{2,5})-full-card\.md"
+)
+
+
+def parse_card_name(name: str) -> tuple[str, str]:
+    """Validate a card filename and return its date and track code."""
+    match = CARD_NAME_PATTERN.fullmatch(name)
+    if not match:
+        raise ValueError(f"Noncanonical full-card filename: {name}")
+    card_date = match.group("date")
+    date.fromisoformat(card_date)
+    return card_date, match.group("track")
+
 
 def build_pick_index(card_names: list[str]) -> bytes:
     """Return the canonical picks index for full-card filenames."""
@@ -19,13 +36,10 @@ def build_pick_index(card_names: list[str]) -> bytes:
         "|---|---|---|---|",
     ]
     for index, name in enumerate(ordered):
-        stem = name.removesuffix("-full-card.md")
-        parts = stem.split("-")
-        date = "-".join(parts[:3])
-        track = parts[3] if len(parts) > 3 else "unknown"
+        card_date, track = parse_card_name(name)
         latest = " **(latest)**" if index == 0 else ""
         lines.append(
-            f"| {date}{latest} | {track} | [picks](./full-card/{name}) | "
+            f"| {card_date}{latest} | {track} | [picks](./full-card/{name}) | "
             f"[SHA-256](./full-card/{name}.sha256) |"
         )
     newest = ordered[0]

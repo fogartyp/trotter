@@ -318,6 +318,183 @@ class PublicBoundaryTests(unittest.TestCase):
             self.assertIn("vendor", result.stdout)
             self.assertIn("160000", result.stdout)
 
+    def test_scans_staged_blob_instead_of_benign_working_tree_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            note = root / "notes.txt"
+            staged_key = "sk" + "-" + "A" * 32
+            note.write_text(staged_key + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "notes.txt"], cwd=root, check=True)
+            note.write_text("benign working tree text\n", encoding="utf-8")
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("OpenAI", result.stdout)
+
+    def test_scans_staged_blob_when_working_path_becomes_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            note = root / "notes.txt"
+            note.write_text("sk" + "-" + "A" * 32 + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "notes.txt"], cwd=root, check=True)
+            note.unlink()
+            note.mkdir()
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("OpenAI", result.stdout)
+
+    def test_rejects_additional_high_confidence_token_formats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            github = "github" + "_pat_" + "A" * 40
+            slack = "xox" + "b-" + "123456789012-" + "A" * 24
+            aws_probe = "aws_secret_access_key = " + "A" * 40
+            (root / "notes.txt").write_text(
+                "\n".join((github, slack, aws_probe)) + "\n", encoding="utf-8"
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            for label in ("GitHub", "Slack", "AWS secret"):
+                self.assertIn(label, result.stdout)
+
+    def test_rejects_official_token_prefixes_and_quoted_secret_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            probes = (
+                "gh" + "r_" + "A" * 40,
+                "gh" + "s_123456_" + "A" * 24,
+                "x" + "app-1-" + "A" * 32,
+                "x" + "wfp-" + "A" * 32,
+                "SecretAccessKey = " + "A" * 40,
+                '"aws_secret_access_key": "' + "A" * 40 + '"',
+                '"api_key": "' + "A" * 32 + '"',
+            )
+            (root / "notes.txt").write_text("\n".join(probes) + "\n", encoding="utf-8")
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            for label in ("GitHub", "Slack", "AWS secret", "credential assignment"):
+                self.assertIn(label, result.stdout)
+
+    def test_rejects_any_unmerged_index_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            secret = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=root,
+                input="sk" + "-" + "A" * 32 + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.strip()
+            benign = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=root,
+                input="benign\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-index", "--index-info"],
+                cwd=root,
+                input=(
+                    f"100644 {secret} 2\tnotes.txt\n"
+                    f"100644 {benign} 3\tnotes.txt\n"
+                ),
+                text=True,
+                check=True,
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("unmerged", result.stdout.lower())
+            self.assertIn("notes.txt", result.stdout)
+
+    def test_corrupt_git_index_fails_closed_instead_of_using_working_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            note = root / "notes.txt"
+            note.write_text("sk" + "-" + "A" * 32 + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "notes.txt"], cwd=root, check=True)
+            note.write_text("benign working tree text\n", encoding="utf-8")
+            (root / ".git" / "index").write_bytes(b"corrupt-index")
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("index", result.stdout.lower())
+            self.assertIn("failed", result.stdout.lower())
+
+    def test_git_detection_error_with_metadata_present_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            note = root / "notes.txt"
+            note.write_text("sk" + "-" + "A" * 32 + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "notes.txt"], cwd=root, check=True)
+            note.write_text("benign working tree text\n", encoding="utf-8")
+            (root / ".git" / "config").write_text("[malformed\n", encoding="utf-8")
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("Git repository detection failed", result.stdout)
+
+    def test_missing_indexed_blob_returns_controlled_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            object_id = subprocess.run(
+                ["git", "ls-files", "-s", "distribution.yaml"],
+                cwd=root,
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.split()[1]
+            object_path = root / ".git" / "objects" / object_id[:2] / object_id[2:]
+            object_path.unlink()
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("Git blob read failed", result.stdout)
+            self.assertNotIn("Traceback", result.stdout)
+
+    def test_untracked_files_are_scanned_directly_but_never_satisfy_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            note = root / "notes.txt"
+            note.write_text("benign untracked text\n", encoding="utf-8")
+
+            benign = run_validate(root)
+            self.assertEqual(benign.returncode, 0, benign.stdout)
+
+            note.write_text("github" + "_pat_" + "A" * 40 + "\n", encoding="utf-8")
+            secret = run_validate(root)
+            self.assertNotEqual(secret.returncode, 0, secret.stdout)
+            self.assertIn("GitHub", secret.stdout)
+            self.assertNotIn("unreadable", secret.stdout.lower())
+
 
 class PickHashBijectionTests(unittest.TestCase):
     def test_rejects_a_full_card_without_its_same_basename_sidecar(self) -> None:
@@ -418,6 +595,23 @@ class DistributionYamlTests(unittest.TestCase):
             self.assertIn("distribution_owned", result.stdout)
             self.assertIn("exactly", result.stdout.lower())
 
+    def test_staged_manifest_deletion_is_not_replaced_by_untracked_working_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "rm", "--cached", "distribution.yaml"],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                check=True,
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("missing distribution.yaml", result.stdout)
+
 
 class SkillLayoutTests(unittest.TestCase):
     def test_rejects_frontmatter_without_a_delimiter_only_closing_line(self) -> None:
@@ -451,6 +645,36 @@ class SkillLayoutTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("exactly one", result.stdout.lower())
 
+    def test_rejects_wrong_canonical_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            skill = root / "skills" / "horse-racing" / "trotter-handicapping" / "SKILL.md"
+            skill.write_text(
+                "---\nname: wrong-public-skill\ndescription: Test\nversion: 1.0.0\n---\n",
+                encoding="utf-8",
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("name", result.stdout.lower())
+            self.assertIn("trotter-handicapping", result.stdout)
+
+    def test_rejects_non_scalar_skill_identity_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            skill = root / "skills" / "horse-racing" / "trotter-handicapping" / "SKILL.md"
+            skill.write_text(
+                "---\nname: [trotter-handicapping]\ndescription: [Test]\n"
+                "version: [1.0.0]\n---\n",
+                encoding="utf-8",
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("scalar", result.stdout.lower())
+
 
 class PickIndexTests(unittest.TestCase):
     def test_rejects_a_stale_generated_picks_index(self) -> None:
@@ -465,6 +689,43 @@ class PickIndexTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("picks/README.md", result.stdout)
             self.assertIn("stale", result.stdout.lower())
+
+    def test_rejects_noncanonical_card_filename_metacharacters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            unsafe_name = "2026-08-15-SAR|INJECT-full-card.md"
+            write_card(root, unsafe_name)
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(unsafe_name, result.stdout)
+            self.assertIn("filename", result.stdout.lower())
+
+    def test_staged_card_deletion_is_not_replaced_by_working_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            card = root / "picks" / "full-card" / CARD_NAME
+            sidecar = card.with_name(card.name + ".sha256")
+            subprocess.run(
+                [
+                    "git",
+                    "rm",
+                    "--cached",
+                    card.relative_to(root).as_posix(),
+                    sidecar.relative_to(root).as_posix(),
+                ],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                check=True,
+            )
+
+            result = run_validate(root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("no full-card", result.stdout.lower())
 
 
 if __name__ == "__main__":

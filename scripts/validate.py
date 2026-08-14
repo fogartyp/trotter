@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from typing import Any
 import yaml
 from yaml.constructor import ConstructorError
 
-from package_contract import build_pick_index
+from package_contract import build_pick_index, parse_card_name
 
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
@@ -113,16 +114,147 @@ def fail(message: str) -> None:
     ERRORS.append(message)
 
 
-def package_entries() -> list[tuple[Path, str | None]]:
-    """List package paths with staged Git modes when an index is available."""
+_INDEX_UNSET = object()
+_INDEX_CACHE: list[tuple[Path, str, str, str]] | None | object = _INDEX_UNSET
+
+
+class PackageReadError(RuntimeError):
+    """Raised after an authoritative package read has already been reported."""
+
+
+def git_metadata_present() -> bool:
+    if os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE"):
+        return True
+    return any(
+        (directory / ".git").exists() or (directory / ".git").is_symlink()
+        for directory in (ROOT, *ROOT.parents)
+    )
+
+
+def git_index_records() -> list[tuple[Path, str, str, str]] | None:
+    """Return all index records without collapsing unmerged stages."""
+    global _INDEX_CACHE
+    if _INDEX_CACHE is not _INDEX_UNSET:
+        return _INDEX_CACHE  # type: ignore[return-value]
     try:
-        cached = subprocess.run(
+        worktree = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except FileNotFoundError:
+        fail("Git index validation failed: git executable is unavailable")
+        _INDEX_CACHE = []
+        return []
+    if worktree.returncode != 0 or worktree.stdout.strip() != "true":
+        if git_metadata_present():
+            fail(
+                "Git repository detection failed while Git metadata is present "
+                f"(exit {worktree.returncode})"
+            )
+            _INDEX_CACHE = []
+            return []
+        _INDEX_CACHE = None
+        return None
+    try:
+        result = subprocess.run(
             ["git", "ls-files", "--cached", "--stage", "-z"],
             cwd=ROOT,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        fail(f"Git index validation failed: {exc}")
+        _INDEX_CACHE = []
+        return []
+    records: list[tuple[Path, str, str, str]] = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        metadata, encoded_path = raw.split(b"\t", 1)
+        mode, object_id, stage = metadata.decode("ascii").split(" ")
+        records.append((ROOT / encoded_path.decode("utf-8"), mode, object_id, stage))
+    _INDEX_CACHE = records
+    return records
+
+
+def stage_zero_entries() -> dict[Path, tuple[str, str]] | None:
+    records = git_index_records()
+    if records is None:
+        return None
+    return {
+        path: (mode, object_id)
+        for path, mode, object_id, stage in records
+        if stage == "0"
+    }
+
+
+def authoritative_paths() -> list[Path]:
+    """Return exactly the regular-file paths represented by the package snapshot."""
+    entries = stage_zero_entries()
+    if entries is not None:
+        return sorted(path for path, (mode, _object_id) in entries.items() if mode in {"100644", "100755"})
+    return sorted(
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
+    )
+
+
+def package_has_file(path: Path) -> bool:
+    entries = stage_zero_entries()
+    if entries is not None:
+        entry = entries.get(path)
+        return entry is not None and entry[0] in {"100644", "100755"}
+    return path.is_file() and not path.is_symlink()
+
+
+def package_bytes(path: Path, object_id: str | None = None) -> bytes:
+    """Read an explicit indexed blob or an authoritative package file."""
+    if object_id is None:
+        entries = stage_zero_entries()
+        if entries is not None:
+            entry = entries.get(path)
+            if entry is None or entry[0] not in {"100644", "100755"}:
+                raise FileNotFoundError(path)
+            object_id = entry[1]
+    if object_id is not None:
+        try:
+            return subprocess.run(
+                ["git", "cat-file", "blob", object_id],
+                cwd=ROOT,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            ).stdout
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            fail(f"Git blob read failed for {path.relative_to(ROOT)}: {exc}")
+            raise PackageReadError(path) from exc
+    return path.read_bytes()
+
+
+def package_text(path: Path) -> str:
+    return package_bytes(path).decode("utf-8")
+
+
+def package_entries() -> list[tuple[Path, str | None, str | None, str | None, bool]]:
+    """Return indexed records plus untracked files for extra boundary scanning."""
+    records = git_index_records()
+    if records is None:
+        return sorted(
+            (path, None, None, None, False)
+            for path in ROOT.rglob("*")
+            if ".git" not in path.parts and "__pycache__" not in path.parts
+        )
+    indexed = [(path, mode, object_id, stage, True) for path, mode, object_id, stage in records]
+    try:
         untracked = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
             cwd=ROOT,
@@ -131,31 +263,23 @@ def package_entries() -> list[tuple[Path, str | None]]:
             stderr=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
-        return sorted(
-            (path, None)
-            for path in ROOT.rglob("*")
-            if ".git" not in path.parts and "__pycache__" not in path.parts
-        )
-    entries: dict[Path, str | None] = {}
-    for raw in cached.stdout.split(b"\0"):
-        if not raw:
-            continue
-        metadata, encoded_path = raw.split(b"\t", 1)
-        mode = metadata.split(b" ", 1)[0].decode("ascii")
-        entries[ROOT / encoded_path.decode("utf-8")] = mode
-    for raw in untracked.stdout.split(b"\0"):
-        if raw:
-            entries.setdefault(ROOT / raw.decode("utf-8"), None)
-    return sorted(entries.items())
+        fail("Git untracked-file scan failed")
+        return sorted(indexed)
+    extras = [
+        (ROOT / raw.decode("utf-8"), None, None, None, False)
+        for raw in untracked.stdout.split(b"\0")
+        if raw
+    ]
+    return sorted(indexed + extras)
 
 
 def validate_manifest() -> None:
     path = ROOT / "distribution.yaml"
-    if not path.is_file():
+    if not package_has_file(path):
         fail("missing distribution.yaml")
         return
     try:
-        manifest = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+        manifest = yaml.load(package_text(path), Loader=UniqueKeyLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         fail(f"distribution.yaml: invalid YAML: {exc}")
         return
@@ -175,7 +299,12 @@ def validate_manifest() -> None:
 
 
 def validate_skill() -> int:
-    skills = sorted(ROOT.glob("skills/**/SKILL.md"))
+    skill_root = ROOT / "skills"
+    skills = sorted(
+        path
+        for path in authoritative_paths()
+        if path.name == "SKILL.md" and path.is_relative_to(skill_root)
+    )
     expected = ROOT / "skills" / "horse-racing" / "trotter-handicapping" / "SKILL.md"
     if skills != [expected]:
         rendered = ", ".join(path.relative_to(ROOT).as_posix() for path in skills) or "none"
@@ -185,10 +314,8 @@ def validate_skill() -> int:
         )
     if expected not in skills:
         return 0
-    if expected.is_symlink():
-        fail(f"{expected.relative_to(ROOT)}: skill file may not be a symlink")
-        return 0
-    content = expected.read_text(encoding="utf-8")
+
+    content = package_text(expected)
     match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", content, re.DOTALL)
     if not match:
         fail(f"{expected.relative_to(ROOT)}: missing delimiter-only YAML frontmatter")
@@ -202,18 +329,28 @@ def validate_skill() -> int:
         fail(f"{expected.relative_to(ROOT)}: frontmatter must be a mapping")
         return 1
     for field in ("name", "description", "version"):
-        if not frontmatter.get(field):
-            fail(f"{expected.relative_to(ROOT)}: missing {field} frontmatter")
+        if not isinstance(frontmatter.get(field), str) or not frontmatter[field].strip():
+            fail(f"{expected.relative_to(ROOT)}: {field} must be a non-empty scalar string")
+    if frontmatter.get("name") != "trotter-handicapping":
+        fail(
+            f"{expected.relative_to(ROOT)}: name must equal 'trotter-handicapping'; "
+            f"got {frontmatter.get('name')!r}"
+        )
     for ref in ("race-shape-framework.md", "drf-classic-pp-guide.md"):
-        if not (expected.parent / "references" / ref).is_file():
+        if not package_has_file(expected.parent / "references" / ref):
             fail(f"{expected.relative_to(ROOT)}: missing reference {ref}")
     return 1
 
 
 def validate_pick_hashes() -> int:
     directory = ROOT / "picks" / "full-card"
-    cards = sorted(directory.glob("*-full-card.md"))
-    sidecars = sorted(directory.glob("*-full-card.md.sha256"))
+    archive_entries = {path for path in authoritative_paths() if path.parent == directory}
+    cards = sorted(
+        path for path in archive_entries if path.name.endswith("-full-card.md")
+    )
+    sidecars = sorted(
+        path for path in archive_entries if path.name.endswith("-full-card.md.sha256")
+    )
     if not cards:
         fail("no full-card pick files found")
         return 0
@@ -226,19 +363,19 @@ def validate_pick_hashes() -> int:
         fail(f"{orphan.relative_to(ROOT)}: orphan sidecar has no same-basename full card")
 
     expected_entries = set(cards) | expected_sidecars
-    if directory.is_dir():
-        for entry in sorted(directory.iterdir()):
-            if entry not in expected_entries:
-                fail(f"{entry.relative_to(ROOT)}: unexpected full-card archive entry")
+    for entry in sorted(archive_entries):
+        if entry not in expected_entries:
+            fail(f"{entry.relative_to(ROOT)}: unexpected full-card archive entry")
 
     for card in cards:
+        try:
+            parse_card_name(card.name)
+        except (ValueError, TypeError) as exc:
+            fail(f"{card.relative_to(ROOT)}: invalid filename: {exc}")
         sidecar = card.with_name(card.name + ".sha256")
-        if card.is_symlink():
-            fail(f"{card.relative_to(ROOT)}: full-card file may not be a symlink")
+        if not package_has_file(sidecar):
             continue
-        if not sidecar.is_file() or sidecar.is_symlink():
-            continue
-        line = sidecar.read_text(encoding="utf-8").strip()
+        line = package_text(sidecar).strip()
         match = re.fullmatch(r"([0-9a-f]{64})\s+([^\s]+)", line)
         if not match:
             fail(f"{sidecar.relative_to(ROOT)}: malformed sidecar")
@@ -250,16 +387,21 @@ def validate_pick_hashes() -> int:
                 f"{sidecar.relative_to(ROOT)}: must target exactly {required_target}; got {declared_target}"
             )
             continue
-        actual_hash = hashlib.sha256(card.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(package_bytes(card)).hexdigest()
         if actual_hash != expected_hash:
             fail(f"{sidecar.relative_to(ROOT)}: hash mismatch")
-        content = card.read_text(encoding="utf-8")
+        content = package_text(card)
         for marker in ("Primary win", "Alternative / value", "Safest show"):
             if marker not in content:
                 fail(f"{card.relative_to(ROOT)}: missing role {marker}")
     index = ROOT / "picks" / "README.md"
-    expected_index = build_pick_index([card.name for card in cards])
-    if not index.is_file() or index.read_bytes() != expected_index:
+    try:
+        expected_index = build_pick_index([card.name for card in cards])
+    except (ValueError, TypeError):
+        expected_index = None
+    if expected_index is not None and (
+        not package_has_file(index) or package_bytes(index) != expected_index
+    ):
         fail("picks/README.md: stale or inconsistent with full-card archive")
     return len(cards)
 
@@ -281,41 +423,51 @@ def sensitive_reason(path: Path) -> str | None:
 
 def validate_public_boundary() -> None:
     patterns = {
-        "GitHub token": re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),
+        "GitHub token": re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+        "GitHub fine-grained token": re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
         "OpenAI key": re.compile("sk" + r"-[A-Za-z0-9_-]{20,}"),
         "AWS access key": re.compile(r"A(?:KIA|SIA)[A-Z0-9]{16}"),
+        "AWS secret": re.compile(
+            r"(?i)[\"']?(?:aws_)?secret(?:_?access)?_?key[\"']?"
+            r"\s*[=:]\s*[\"']?[A-Za-z0-9/+=]{40}"
+        ),
+        "Slack token": re.compile(r"x(?:ox[a-z]|app|wfp)-[A-Za-z0-9-]{10,}"),
         "credential assignment": re.compile(
-            r"(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)"
-            r"\s*[=:]\s*[\"']?[A-Za-z0-9_./+-]{12,}"
+            r"(?i)[\"']?(api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)"
+            r"[\"']?\s*[=:]\s*[\"']?[A-Za-z0-9_./+-]{12,}"
         ),
         "private key block": re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
         "absolute macOS home": re.compile("/" + "Users/" + r"[^/\s`]+/"),
         "absolute Windows home": re.compile(r"[A-Za-z]:\\Users\\[^\\\s]+\\"),
     }
-    for path, git_mode in package_entries():
+    for path, git_mode, object_id, stage, indexed in package_entries():
         relative = path.relative_to(ROOT)
-        if git_mode is not None and git_mode not in {"100644", "100755"}:
+        if indexed and stage != "0":
+            fail(f"{relative}: unmerged index stage {stage} is not allowed")
+            continue
+        if indexed and git_mode not in {"100644", "100755"}:
             fail(f"{relative}: forbidden staged Git mode {git_mode}; expected regular file")
             continue
-        if path.is_symlink():
-            fail(f"{relative}: symlink is not allowed in the public package")
-            continue
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            fail(f"{relative}: non-regular package entry")
-            continue
+        if not indexed:
+            if path.is_symlink():
+                fail(f"{relative}: symlink is not allowed in the public package")
+                continue
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                fail(f"{relative}: non-regular package entry")
+                continue
         reason = sensitive_reason(path)
         if reason:
             fail(f"{relative}: forbidden {reason}")
             continue
         try:
-            payload = path.read_bytes()
+            payload = package_bytes(path, object_id) if indexed else path.read_bytes()
             if b"\0" in payload:
                 fail(f"{relative}: binary NUL byte in text package file")
                 continue
             content = payload.decode("utf-8")
-        except (OSError, UnicodeError) as exc:
+        except (OSError, UnicodeError, subprocess.CalledProcessError) as exc:
             fail(f"{relative}: unreadable non-UTF-8 package file: {exc}")
             continue
         for label, pattern in patterns.items():
@@ -324,10 +476,15 @@ def validate_public_boundary() -> None:
 
 
 def main() -> int:
-    validate_manifest()
-    skill_count = validate_skill()
-    card_count = validate_pick_hashes()
-    validate_public_boundary()
+    skill_count = 0
+    card_count = 0
+    try:
+        validate_manifest()
+        skill_count = validate_skill()
+        card_count = validate_pick_hashes()
+        validate_public_boundary()
+    except PackageReadError:
+        pass
 
     if ERRORS:
         print(f"Validation failed with {len(ERRORS)} error(s):")
