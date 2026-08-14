@@ -483,6 +483,9 @@ class PublicBoundaryTests(unittest.TestCase):
             root = make_validation_package(Path(tmp))
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
             subprocess.run(["git", "add", "."], cwd=root, check=True)
+            cache = root / "scripts" / "__pycache__" / "package_contract.cpython-312.pyc"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(b"interpreter cache")
             note = root / "notes.txt"
             note.write_text("benign untracked text\n", encoding="utf-8")
 

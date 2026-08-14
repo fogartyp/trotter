@@ -265,11 +265,14 @@ def package_entries() -> list[tuple[Path, str | None, str | None, str | None, bo
     except (FileNotFoundError, subprocess.CalledProcessError):
         fail("Git untracked-file scan failed")
         return sorted(indexed)
-    extras = [
-        (ROOT / raw.decode("utf-8"), None, None, None, False)
-        for raw in untracked.stdout.split(b"\0")
-        if raw
-    ]
+    extras: list[tuple[Path, None, None, None, bool]] = []
+    for raw in untracked.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = ROOT / raw.decode("utf-8")
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        extras.append((path, None, None, None, False))
     return sorted(indexed + extras)
 
 
