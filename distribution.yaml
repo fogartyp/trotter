@@ -1,0 +1,11 @@
+name: trotter
+version: 0.1.0
+description: "Patrick Fogarty's evidence-first thoroughbred handicapping partner"
+hermes_requires: ">=0.20.0"
+author: "Patrick Fogarty + Trotter"
+license: "MIT"
+distribution_owned:
+  - SOUL.md
+  - profile.yaml
+  - skills/
+  - distribution.yaml
