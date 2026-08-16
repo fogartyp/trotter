@@ -394,9 +394,14 @@ def validate_pick_hashes() -> int:
         if actual_hash != expected_hash:
             fail(f"{sidecar.relative_to(ROOT)}: hash mismatch")
         content = package_text(card)
-        for marker in ("Primary win", "Alternative / value", "Safest show"):
-            if marker not in content:
-                fail(f"{card.relative_to(ROOT)}: missing role {marker}")
+        role_markers = {
+            "Primary win": ("Primary win",),
+            "Alternative / value": ("Alternative / value", "Alternative/value"),
+            "Safest show": ("Safest show",),
+        }
+        for role, markers in role_markers.items():
+            if not any(marker in content for marker in markers):
+                fail(f"{card.relative_to(ROOT)}: missing role {role}")
     index = ROOT / "picks" / "README.md"
     try:
         expected_index = build_pick_index([card.name for card in cards])

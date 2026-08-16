@@ -500,6 +500,21 @@ class PublicBoundaryTests(unittest.TestCase):
 
 
 class PickHashBijectionTests(unittest.TestCase):
+    def test_accepts_compact_alternative_value_role_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_validation_package(Path(tmp))
+            card = root / "picks" / "full-card" / CARD_NAME
+            content = "# Card\n\nPrimary win\nAlternative/value\nSafest show\n"
+            card.write_text(content, encoding="utf-8")
+            card.with_name(card.name + ".sha256").write_text(
+                f"{hashlib.sha256(content.encode()).hexdigest()}  full-card/{CARD_NAME}\n",
+                encoding="utf-8",
+            )
+
+            result = run_validate(root)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_rejects_a_full_card_without_its_same_basename_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_validation_package(Path(tmp))
