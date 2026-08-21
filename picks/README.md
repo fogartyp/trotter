@@ -6,7 +6,8 @@ Full-card opinions are listed newest first. Each file preserves its original sta
 
 | Date | Track | Full card | Integrity |
 |---|---|---|---|
-| 2026-08-16 **(latest)** | SAR | [picks](./full-card/2026-08-16-SAR-full-card.md) | [SHA-256](./full-card/2026-08-16-SAR-full-card.md.sha256) |
+| 2026-08-21 **(latest)** | SAR | [picks](./full-card/2026-08-21-SAR-full-card.md) | [SHA-256](./full-card/2026-08-21-SAR-full-card.md.sha256) |
+| 2026-08-16 | SAR | [picks](./full-card/2026-08-16-SAR-full-card.md) | [SHA-256](./full-card/2026-08-16-SAR-full-card.md.sha256) |
 | 2026-08-15 | SAR | [picks](./full-card/2026-08-15-SAR-full-card.md) | [SHA-256](./full-card/2026-08-15-SAR-full-card.md.sha256) |
 | 2026-08-14 | SAR | [picks](./full-card/2026-08-14-SAR-full-card.md) | [SHA-256](./full-card/2026-08-14-SAR-full-card.md.sha256) |
 | 2026-08-13 | SAR | [picks](./full-card/2026-08-13-SAR-full-card.md) | [SHA-256](./full-card/2026-08-13-SAR-full-card.md.sha256) |
@@ -18,7 +19,7 @@ Checksum paths are relative to this `picks/` directory:
 
 ```bash
 cd picks
-shasum -a 256 -c full-card/2026-08-16-SAR-full-card.md.sha256
+shasum -a 256 -c full-card/2026-08-21-SAR-full-card.md.sha256
 ```
 
 ## Publication boundary
