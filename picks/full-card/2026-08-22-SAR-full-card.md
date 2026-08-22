@@ -4,6 +4,8 @@
 
 **Sources:** supplied DRF `SAR--08-22-2026.pdf` (SHA-256 `09e6b5a8bbbdac101685d7083c4fd52919e4a161031cd161f9bdf8a55d99b2d2`) and official NYRA direct scratches/status feed last updated 12:46:13 PM ET (archive SHA-256 `0d42b74040240ace4c64c9984b96e47927ef8090d9283581317a7650791a115e`). Main track **FAST**; Mellon and Inner turf **FIRM**; Mellon rail 18 ft, Inner rail 27 ft.
 
+**R2 pre-race audit reconciliation — 1:13 PM EDT, before post:** the rapid R2-only lock assigned #7 Arkhipov both primary-win and safest-show roles. The fuller runner-by-runner audit completed before this publication retained #7 as primary and #3 Mutaawid as alternative/value, but assigned the final safest-show role to **#4 Asbury Park (GB) (ML-2/1)** based on his exact-distance G2 win, Brown/Franco connection, and sharp 4/55 work. The original rapid lock remains preserved unchanged; no results were consulted.
+
 ## Official status incorporated
 
 - R1: #1 Teuflesdale and #4 Big Frosty scratched; race excluded because publication began after post.
