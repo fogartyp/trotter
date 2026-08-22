@@ -1,5 +1,7 @@
 # Trotter Race-Shape Framework v0.1
 
+For a concise code table, see the [Trotter Complete Race-Shape Key](./complete-race-shape-key.md).
+
 This is a starting taxonomy for learning—not a finished betting system. A race shape is multi-axis. Record all axes before deciding which factors deserve weight.
 
 ## Axis 1 — Condition and class family

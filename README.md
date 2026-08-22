@@ -94,7 +94,7 @@ The sync is allowlist-only. It copies:
 6. Publish primary win, alternative/value, and safest-show roles separately.
 7. Hash-lock pre-race work; append results in a separate review without hindsight edits.
 
-See the full [`trotter-handicapping` skill](./skills/horse-racing/trotter-handicapping/SKILL.md) and its [`race-shape framework`](./skills/horse-racing/trotter-handicapping/references/race-shape-framework.md).
+See the full [`trotter-handicapping` skill](./skills/horse-racing/trotter-handicapping/SKILL.md), the concise [`complete race-shape key`](./skills/horse-racing/trotter-handicapping/references/complete-race-shape-key.md), and the detailed [`race-shape framework`](./skills/horse-racing/trotter-handicapping/references/race-shape-framework.md).
 
 ## License
 
